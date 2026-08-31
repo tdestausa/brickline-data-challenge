@@ -1,0 +1,86 @@
+# ==========================================================================
+# Brickline Motors — Data Catalog Manifest
+# Domain: Brickline Parts (Commerce)
+# Data Product: parts-order
+# Author: Teddy Desta
+# ==========================================================================
+# Went with parts-order over customer-account for the flagship manifest
+# here — mostly because this is the half of the CEO's question that
+# actually lives in Commerce, and customer-account has that B2B/B2C
+# modeling problem I flagged in the data dictionary that I didn't want to
+# quietly paper over in a catalog entry. Order Fulfillment's just cleaner
+# to spec, if I'm being honest.
+
+name: parts-order
+version: 1.0.0
+owner:
+  domain: commerce
+  role: "Head of E-Commerce (steward: Order Fulfillment product owner)"
+  contact: parts-data@brickline.example
+
+description: >
+  Every parts purchase through the Brickline Parts storefront, B2B and B2C
+  alike. Includes an optional, self-reported VIN a customer can attach to
+  an order — unverified at write time, matched later by the platform.
+classification: confidential
+
+source_systems:
+  - commerce-platform   # orders.json — the e-commerce backend. Only one source system here, which honestly makes this the easiest manifest of the three to write.
+
+schema:
+  - field: order_id
+    type: text
+    classification: internal
+  - field: customer_id
+    type: text
+    classification: confidential
+    notes: "CU_xxxxxx. Same caveat as owner_dealer_customer_ref in the Dealer Network manifest — this is a pointer, not the customer's actual name or email."
+  - field: vehicle_vin_provided
+    type: char(17)
+    classification: confidential
+    notes: >
+      Nullable, free text exactly as the customer typed it — often
+      lowercase. Not validated against vehicle-master at write time, and
+      I'd defend that choice if pushed on it: validating live would mean
+      Parts' checkout breaks the moment Manufacturing's system is
+      unreachable, and that's a worse outcome than an occasional
+      unmatched VIN sitting around until the async match job runs.
+  - field: total_usd
+    type: numeric(10,2)
+    classification: confidential
+  - field: order_date
+    type: timestamptz
+    classification: internal
+  - field: status
+    type: "enum(processing, shipped, delivered, cancelled)"
+    classification: internal
+
+sla:
+  freshness: "Near real-time — checkout writes straight to this, no batch delay"
+  completeness: "100% of completed checkouts. Abandoned carts don't count, and shouldn't."
+  availability: "99.9% — this is revenue-generating, hard to justify anything lower"
+
+lineage:
+  upstream:
+    - commerce-platform.orders (direct, no intermediate transform beyond the usual field mapping)
+  downstream:
+    - platform.vin-normalization       # matches vehicle_vin_provided against vehicle-master, async, not at write time
+    - platform.party-identity-link      # the customer_id side of the CEO's-question join
+
+consumption_patterns:
+  - "GET /orders?customer_id={id} — REST API"
+  - "GET /orders?date_range={range} — REST API"
+  - "Governed read-only SQL view, catalog-registered"
+
+consumption_patterns_blocked:
+  - "Direct connection to the commerce platform's production order database"
+  - "Nightly CSV export to a shared drive — yes, I'm aware someone's probably already doing something like this informally. That's Problem 10. It needs to stop, not get formalized."
+  - "Any B2B partner integration that pulls straight from this table instead of going through the API"
+
+sample_query: |
+  -- orders placed last quarter with a self-reported VIN attached:
+  SELECT order_id, customer_id, vehicle_vin_provided, total_usd, order_date
+  FROM catalog.parts_order
+  WHERE order_date >= date_trunc('quarter', now()) - interval '3 months'
+    AND order_date <  date_trunc('quarter', now())
+    AND vehicle_vin_provided IS NOT NULL;

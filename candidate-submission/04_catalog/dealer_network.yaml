@@ -1,0 +1,96 @@
+# ==========================================================================
+# Brickline Motors — Data Catalog Manifest
+# Domain: Dealer Network
+# Data Product: vehicle-ownership
+# Author: Teddy Desta
+# ==========================================================================
+# This one didn't exist as a tracked thing six months ago — it's the
+# sub-domain named as a gap in the domain model (Problem 9). Picking it as
+# Dealer Network's flagship manifest instead of something safer, like
+# dealer-directory, because this is the actual product that closes the
+# recall question. Dealer Onboarding data is real too, just not as
+# interesting a manifest to write up, honestly.
+
+name: vehicle-ownership
+version: 1.0.0
+owner:
+  domain: dealer_network
+  role: "VP of Dealer Operations (steward: Vehicle Ownership product owner — role exists on paper, hire is TBD)"
+  contact: dealer-ops-data@brickline.example   # same placeholder caveat as the manufacturing manifest
+
+description: >
+  Who currently holds title to a given VIN, plus the full history of every
+  prior transfer. Append-only on purpose — "who owned this VIN when the
+  recall was issued" is a real question Dealer Network needs to answer,
+  not just "who owns it right now."
+classification: confidential
+
+source_systems:
+  - dms                # sales_orders.csv — origin of every current-ownership row
+  - dms-trade-in        # trade_ins.csv — acquisition events too, not just sales
+
+schema:
+  - field: ownership_id
+    type: uuid
+    classification: internal
+  - field: vin
+    type: char(17)
+    classification: internal
+    notes: >
+      No hard link back to manufacturing.vehicle-master here — a trade-in
+      can bring in a VIN Brickline never built, and that's fine, expected
+      even. I'd rather have an occasional orphan VIN than a broken
+      ingestion pipeline every time a customer trades in a non-Brickline car.
+  - field: owner_dealer_customer_ref
+    type: text
+    classification: confidential
+    notes: "D-XXXXX. Not the customer's name or contact info — just the reference. The full customer record stays in its own product, not duplicated here."
+  - field: dealer_id
+    type: text
+    classification: internal
+  - field: acquisition_type
+    type: "enum(sale, trade_in)"
+    classification: internal
+  - field: sale_price_usd
+    type: numeric(10,2)
+    classification: confidential
+    notes: "Null for a trade_in row — appraised value belongs to Trade-In Intake's own product. Didn't want to duplicate it and end up with two numbers that quietly drift apart."
+  - field: finance_type
+    type: "enum(cash, loan, lease)"
+    classification: confidential
+  - field: effective_from
+    type: date
+    classification: internal
+  - field: ownership_status
+    type: "enum(current, superseded)"
+    classification: internal
+
+sla:
+  freshness: "Updated same-day as the sale or trade-in event. Can't really lag on this one — being current is the whole point of the product."
+  completeness: "Every VIN sold or traded through a Brickline dealer since go-live has a row. Historical backfill from before go-live is a separate project, not covered by this SLA."
+  availability: "99.5%. Slightly lower bar than vehicle-master — annoying if this is down for an hour, not catastrophic."
+
+lineage:
+  upstream:
+    - dms.sales_orders (event: sale)
+    - dms.trade_ins (event: trade_in)
+  downstream:
+    - platform.party-identity-link   # the table that actually lets someone connect a vehicle owner to a Commerce account
+    - manufacturing (recall remediation campaigns — "who do we mail")
+
+consumption_patterns:
+  - "GET /vehicles/{vin}/ownership — REST API"
+  - "GET /owners/{dealer_customer_ref}/vehicles — reverse lookup, REST API"
+  - "Governed read-only SQL view, catalog-registered"
+
+consumption_patterns_blocked:
+  - "Direct connection to any dealer's own DMS database — the 200 dealers each running their own instance is exactly the mess this product exists to paper over, don't route around it"
+  - "Personal credentials into any dealer's local DMS"
+  - "Spreadsheet exports of current-owner lists — sale_price and finance_type are Confidential, an Excel file on someone's laptop is not an acceptable home for that data"
+
+sample_query: |
+  -- current owner of a specific VIN, through the governed view:
+  SELECT owner_dealer_customer_ref, dealer_id, effective_from
+  FROM catalog.vehicle_ownership
+  WHERE vin = '1HGBH41JXMN109186'
+    AND ownership_status = 'current';

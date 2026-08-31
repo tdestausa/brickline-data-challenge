@@ -1,0 +1,102 @@
+# ==========================================================================
+# Brickline Motors — Data Catalog Manifest
+# Domain: Manufacturing
+# Data Product: vehicle-master
+# Author: Teddy Desta
+# ==========================================================================
+# Picked this as Manufacturing's flagship product because it's the one
+# every other domain actually needs — Dealer Network needs it for warranty
+# and ownership work, Parts needs it for compatibility lookups. Everything
+# else Manufacturing owns (QC results, supplier receiving) stays internal
+# for now, not written up as its own catalog entry yet.
+
+name: vehicle-master
+version: 1.0.0
+owner:
+  domain: manufacturing
+  role: "VP of Manufacturing (day-to-day steward: Plant Data Lead, one per plant)"
+  contact: plant-data-lead@brickline.example   # placeholder, real inbox TBD — not going to pretend I have one
+description: >
+  Canonical, queryable record of every vehicle Brickline has built — VIN,
+  build spec, plant of origin, warranty start date. This is the "does this
+  VIN exist and what do we know about it" answer for the whole company.
+  Recall status specifically lives in a related product, not duplicated
+  here — didn't want vehicle-master turning into a dumping ground for
+  anything vaguely vehicle-shaped.
+classification: internal
+
+source_systems:
+  - plant1_erp   # production_order_id, vin, model_code, model_year, production_date, line_completion_ts
+  - plant2_erp   # mo_id, vehicle_id, model, yr, prod_dt, completed_at — renamed to the plant1 vocabulary at ingestion, not carried through as-is
+
+schema:
+  - field: vin
+    type: char(17)
+    classification: internal
+    notes: >
+      Canonicalized to uppercase ISO 3779 before this record is ever
+      published. Plant 2 calls this vehicle_id at the source — renamed
+      here on purpose, not laziness.
+  - field: plant_id
+    type: text
+    classification: internal
+    notes: "P1 or P2. Nothing fancier than that yet."
+  - field: model_code
+    type: text
+    classification: internal
+    notes: "Plant 1 calls this model_code, Plant 2 calls it model. Picked model_code as canonical — mostly because Plant 1's name is more self-explanatory, if I'm honest."
+  - field: model_year
+    type: smallint
+    classification: internal
+  - field: trim
+    type: text
+    classification: internal
+    notes: "Nullable — not every build record in the sample data carries a clean trim value."
+  - field: build_date
+    type: date
+    classification: internal
+    notes: "Plant 1 is YYYY-MM-DD, Plant 2 is YYYY/MM/DD at the source. Normalized here — don't trust a raw ERP export for this field."
+  - field: line_completion_ts
+    type: timestamptz
+    classification: internal
+  - field: warranty_start_date
+    type: date
+    classification: internal
+  - field: source_system
+    type: text
+    classification: internal
+    notes: "plant1_erp or plant2_erp. Kept so anyone auditing a weird-looking record can trace it back."
+
+sla:
+  freshness: "Build data refreshes daily, batch. Not real-time — didn't see a strong enough case for it yet, build events just aren't that high-frequency."
+  completeness: "100% of vehicles completed in the last 24h present within 1 hour of line_completion_ts"
+  availability: "99.9% — this is a foundational product, a lot of other stuff breaks quietly if this one's down"
+
+lineage:
+  upstream:
+    - plant1_erp (production_orders, direct extract, normalized on ingest)
+    - plant2_erp (production_orders, direct extract, normalized on ingest)
+  downstream:
+    - dealer_network.vehicle-ownership (needs a valid VIN before it'll attach an owner to it)
+    - commerce.parts-order (matched indirectly, via the VIN Normalization service — not a direct read, see consumption_patterns)
+  related_products:
+    - manufacturing-recall   # separate manifest, not written up yet — flagging so nobody assumes recall status lives on this record
+
+consumption_patterns:
+  - "GET /vehicles/{vin} — REST API, the expected path for a single-VIN lookup"
+  - "GET /vehicles?recall_status=active — REST API, batch/bulk lookups"
+  - "Governed read-only SQL view (catalog-registered) — for anyone doing real analytical work who shouldn't be hammering the API row by row"
+
+consumption_patterns_blocked:
+  - "Direct connection to either plant's ERP database. No exceptions, not even for 'just this once.'"
+  - "Personal DB credentials shared informally to pull vehicle data — if I find out this is happening I will actually be annoyed"
+  - "Scheduled file drops / SFTP exports to a shared folder"
+  - "Ad-hoc SQL dumps for 'a quick analysis' — quick analyses are exactly how Problem 10 got started"
+
+sample_query: |
+  -- What a Dealer Network consumer might run, through the governed view —
+  -- not against the source ERP:
+  SELECT vin, model_code, model_year, build_date, warranty_start_date
+  FROM catalog.vehicle_master
+  WHERE plant_id = 'P1'
+    AND build_date >= '2026-04-01';
